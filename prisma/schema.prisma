@@ -1,0 +1,124 @@
+// WayShare data model.
+//
+// Portable by design: only scalar types that map 1:1 onto PostgreSQL are used, status
+// columns are plain strings (validated by Zod + TypeScript unions in src/lib/domain.ts),
+// and every foreign key is indexed. To move to PostgreSQL, switch `provider` below,
+// point DATABASE_URL at the new database and swap the driver adapter in
+// src/lib/server/db.ts for @prisma/adapter-pg.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  avatarUrl     String
+  rating        Float    @default(4.9)
+  vehicleModel  String?
+  vehiclePlate  String?
+  /// Spendable balance in EUR. Seat payments are debited from here into escrow,
+  /// driver payouts and refunds are credited back.
+  walletBalance Float    @default(100.00)
+  createdAt     DateTime @default(now())
+
+  ridesOffered RideOffer[]   @relation("DriverRides")
+  bookings     Booking[]     @relation("PassengerBookings")
+  transactions Transaction[]
+}
+
+model RideOffer {
+  id                String   @id @default(cuid())
+  driverId          String
+  originName        String
+  originLat         Float
+  originLng         Float
+  destName          String
+  destLat           Float
+  destLng           Float
+  departureTime     DateTime
+  baseDistanceKm    Float
+  baseDurationMin   Int
+  /// Road route origin → destination as a Google encoded polyline (precision 5).
+  /// Detours are measured against this line; null falls back to the straight segment.
+  routeGeometry     String?
+  totalSeats        Int
+  availableSeats    Int
+  /// Price for the full route; passengers boarding along the way pay a distance-based share.
+  pricePerSeat      Float
+  /// Pickup radius: how far off the route (km) the driver will go to collect passengers.
+  maxDetourKm       Float
+  /// Pickup radius still unused; every booking spends its pickup's distance from the route.
+  remainingDetourKm Float
+  /// Optional surcharge per extra detour kilometre (0 = free detour).
+  detourPricePerKm  Float    @default(0.0)
+  notes             String?
+  /// OPEN | FULL | COMPLETED | CANCELLED
+  status            String   @default("OPEN")
+  createdAt         DateTime @default(now())
+
+  driver   User      @relation("DriverRides", fields: [driverId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@index([status, departureTime])
+  @@index([driverId])
+}
+
+model Booking {
+  id                String   @id @default(cuid())
+  rideOfferId       String
+  passengerId       String
+  seatsBooked       Int
+  pickupName        String
+  pickupLat         Float
+  pickupLng         Float
+  /// How far the pickup lies from the driver's route (km) — what it spends of the pickup radius.
+  offRouteKm        Float    @default(0)
+  /// Extra road distance this pickup adds to the driver's route (there and back).
+  detourDistanceKm  Float
+  /// Extra driving minutes this pickup adds.
+  detourDurationMin Int
+  /// Share of the full-route seat price this passenger pays: their distance (pickup → destination)
+  /// over the route distance (origin → destination), with a minimum (see src/lib/pricing.ts).
+  fareShare         Float    @default(1)
+  seatCost          Float
+  detourCost        Float
+  platformFee       Float
+  totalPrice        Float
+  /// 4-digit code the passenger hands to the driver at pickup to release escrow.
+  pickupPin         String
+  /// CONFIRMED_IN_ESCROW | PICKED_UP_PAID | CANCELLED (by the passenger or a cancelled trip) | DECLINED (by the driver)
+  status            String   @default("CONFIRMED_IN_ESCROW")
+  createdAt         DateTime @default(now())
+
+  rideOffer    RideOffer     @relation(fields: [rideOfferId], references: [id], onDelete: Cascade)
+  passenger    User          @relation("PassengerBookings", fields: [passengerId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([rideOfferId, status])
+  @@index([passengerId, status])
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String
+  bookingId   String?
+  /// Signed EUR amount: negative leaves the wallet, positive arrives in it.
+  amount      Float
+  /// ESCROW_HOLD | DRIVER_PAYOUT | REFUND | TOP_UP
+  type        String
+  description String
+  createdAt   DateTime @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([bookingId])
+}
